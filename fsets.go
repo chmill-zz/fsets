@@ -56,6 +56,18 @@ You can also do this within a method of a struct:
 You will also notice that functions can have exponential backoff retries. You can set some to have this, others not and use
 different backoffs for different functions. We also return the state object so that you can get return data that was stack
 allocated and not heap allocated. This is useful for performance and memory usage.
+
+There is a cost to using fsets vs standard function call chains. The runtime has to do the calling of the function calls, which slows
+down the execution. In addition, I don't believe Go is smart enough to inline the function calls, so you lose that optimization as well.
+
+This can be seen with the following benchmark:
+
+BenchmarkCallChain-10           573722551                2.073 ns/op
+BenchmarkFset-10                 8607430               141.8 ns/op
+
+This shows that the overhead of using fsets adds about 130-150 ns. But this is overhead that is an additon and not 70x slower
+execution time.  This is not a problem for most use cases that do any kind of system call (disk, network, ...). However,
+if its a real tight loop using cache lines, you want to use a standard function call chain.
 */
 package fsets
 
@@ -90,6 +102,8 @@ type C[T any] struct {
 	O []exponential.RetryOption
 }
 
+// exec is responsible for executing the function F with the provided StateObject.
+// If a Backoff is provided, it will retry the function call using the Backoff.Retry method.
 func (c C[T]) exec(so StateObject[T]) (StateObject[T], error) {
 	if c.B == nil {
 		return c.F(so)

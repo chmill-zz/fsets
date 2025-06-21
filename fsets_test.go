@@ -2,7 +2,6 @@ package fsets
 
 import (
 	"errors"
-	"log"
 	"testing"
 	"time"
 
@@ -52,7 +51,6 @@ func TestExec(t *testing.T) {
 			name: "Run with backoff",
 			c: C[Data]{
 				F: func(so StateObject[Data]) (StateObject[Data], error) {
-					log.Println("executed")
 					if so.Data.count < 5 {
 						so.Data.count++
 						return so, errors.New("fail")
