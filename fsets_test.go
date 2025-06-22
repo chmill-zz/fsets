@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/gostdlib/base/retry/exponential"
+	"github.com/gostdlib/base/values/generics/promises"
 )
 
 var backoff *exponential.Backoff
@@ -123,20 +124,66 @@ func TestRun(t *testing.T) {
 		fsets := Fset[Data]{}
 		fsets.Adds(test.c...)
 		so := StateObject[Data]{Ctx: t.Context(), Data: Data{}}
-		so, err := fsets.Run(so)
+		so = fsets.Run(so)
 
 		switch {
-		case test.wantErr && err == nil:
+		case test.wantErr && so.Err() == nil:
 			t.Errorf("TestRun(%s): got err == nil, want err != nil", test.name)
 			continue
-		case !test.wantErr && err != nil:
-			t.Errorf("TestRun(%s): got err == %s, want err == nil", test.name, err)
+		case !test.wantErr && so.Err() != nil:
+			t.Errorf("TestRun(%s): got err == %s, want err == nil", test.name, so.Err())
 			continue
-		case err != nil:
+		case so.Err() != nil:
 		}
 
 		if so.Data.count != test.wantCount {
 			t.Errorf("TestRun(%s): got count == %d, want count == %d", test.name, so.Data.count, test.wantCount)
+		}
+	}
+}
+
+func TestParallel(t *testing.T) {
+	t.Parallel()
+
+	f := func(so StateObject[Data]) (StateObject[Data], error) {
+		if so.Data.count < 0 {
+			return so, errors.New("negative count not allowed")
+		}
+		so.Data.count++
+
+		return so, nil
+	}
+
+	set := Fset[Data]{}
+	set.Adds(
+		C[Data]{F: f},
+		C[Data]{F: f},
+		C[Data]{F: f},
+	)
+
+	in, wait := set.Parallel(t.Context(), 10)
+
+	promises := make([]promises.Promise[StateObject[Data], StateObject[Data]], 0, 5)
+	for range 5 {
+		p := set.Promise(t.Context(), Data{count: 0})
+		in <- p
+		promises = append(promises, p)
+	}
+	// This one should error.
+	p := set.Promise(t.Context(), Data{count: -1})
+	in <- p
+
+	_ = wait.Wait(t.Context())
+
+	errCount := 0
+	for _, promise := range promises {
+		resp, _ := promise.Get(t.Context())
+		if resp.Err != nil {
+			errCount++
+			continue
+		}
+		if resp.V.Data.count != 3 {
+			t.Errorf("TestParallel: got count == %d, want count == 3", resp.V.Data.count)
 		}
 	}
 }

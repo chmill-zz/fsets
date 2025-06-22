@@ -51,7 +51,7 @@ func BenchmarkFset(b *testing.B) {
 
 	for b.Loop() {
 		so := StateObject[args]{Data: args{i: 0}}
-		so, _ = set.Run(so)
+		so = set.Run(so)
 		result = so.Data
 	}
 }
