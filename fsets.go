@@ -1,11 +1,11 @@
 /*
 Package fsets provides a function set for executing a chain of function calls that pass a state object between them.
 This is the mutant child of my statemachine package without fancy routing. It provides automatic retries and the idea
-is to reduce testing chains like with the statemachine, but with a linear calls.
+is to reduce testing chains like with the statemachine, but with linear calls.
 
-Where this is helpful is avoiding having to do a lot of testing of the entire call chain.  With this, you can test
-each function independently without having to mock out the next call. This also will let you still access helper methods
-and fields of a struct so you can still use methods as part of the function set.
+Where this is helpful is avoiding doing testing of the entire call chain from a particular section of the chain down.
+With this, you can test each function independently without having to mock out the next call. This also will let you still
+access helper methods and fields of a struct so you can still use methods as part of the function set.
 
 This also contains methods to run the function set in parallel or concurrently. This is useful for using the function set
 in a way that allows for parallel execution of the function calls. It leverages promises to allow for getting the results back.
@@ -61,11 +61,11 @@ different backoffs for different functions. We also return the state object so t
 allocated and not heap allocated. This is useful for performance and memory usage.
 
 In addition to the serial execution through Run() calls, you can also run the function set in parallel or concurrently. This is
-useful when you want to have a some type of bound on number of executions with resuse of goroutines.
+useful when you want to have a some type of bound on the number of executions and reuse goroutines.
 The provided methods allows you to feed in a channel of promises that will be executed in parallel or concurrently with the
 function set. Parallel and concurrent execution is simply a function of the number of concurrent goroutines that are running the
-function set. In parallel, there is a fixed number for execution say 5 instances are running. In concurrent, there might be 5
-instances running with another len(fset.C) instances running. This mimics the behavior of channel based concurrency execution.
+function set. In parallel, there is a fixed number for execution, like say 5 instances running. In concurrent, there might be 5
+instances running with another len(fset.Len()) instances running. This mimics the behavior of channel based concurrency execution.
 
 You can use promises to a provide a bounded RPC call chain:
 
@@ -112,9 +112,9 @@ You can use promises to a provide a bounded RPC call chain:
 		return resp.V, resp.Err()
 	}
 
-This is similiar if you want to use parallel execution.
+It is similiar if you want to use parallel execution instead using .Parallel() instead of .Concurrent().
 
-You can also just use the Fset.Run(), which will be unbounded to the number of allowed RPC calls:
+You can also just use the Fset.Run(), which will be bounded only to the number of allowed RPC calls:
 
 	func (s *RPCServer) Serve(ctx context.Context, req RPCRequest) (RPCResponse, error) {
 		// Create a new StateObject for the request.
@@ -130,7 +130,7 @@ You can also just use the Fset.Run(), which will be unbounded to the number of a
 		return resp.Data, nil
 	}
 
-You can also do an ordered pipeline by using the WithePipeline option when calling Concurrent or Parallel:
+You can also do an ordered pipeline by using the WithPipeline option when calling Concurrent or Parallel:
 
 	fset := fsets.Fset[Data]{}
 
@@ -140,9 +140,12 @@ You can also do an ordered pipeline by using the WithePipeline option when calli
 		fsets.C[Data]{F: handleData},
 		fsets.C[Data]{F: handleResponse},
 	)
+
+	// Create a channel to get the results on.
 	out := make(chan promises.Promise[StateObject[T], StateObject[T]], runtime.GOMAXPROCS(-1) + fset.Len())
 	in, _ := fset.Concurrent(ctx, -1, WithPipeline[Data](out))
 
+	// Send data to the input channel.
 	go func() {
 		defer close(in) // Close the input channel when done.
 		for _, data := range inputData{
@@ -151,6 +154,7 @@ You can also do an ordered pipeline by using the WithePipeline option when calli
 		}
 	}()
 
+	// Get data from the output channel.
 	for promise := range out {
 		// Process the promise results.
 		resp, err := p.Get()
