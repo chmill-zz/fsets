@@ -187,3 +187,49 @@ func TestParallel(t *testing.T) {
 		}
 	}
 }
+
+func TestWithPipeline(t *testing.T) {
+	t.Parallel()
+
+	f := func(so StateObject[Data]) (StateObject[Data], error) {
+		if so.Data.count < 0 {
+			return so, errors.New("negative count not allowed")
+		}
+		so.Data.count++
+
+		return so, nil
+	}
+
+	set := Fset[Data]{}
+	set.Adds(
+		C[Data]{F: f},
+		C[Data]{F: f},
+		C[Data]{F: f},
+	)
+
+	out := make(chan promises.Promise[StateObject[Data], StateObject[Data]], 10)
+	in, _ := set.Parallel(t.Context(), 10, WithPipeline(out))
+
+	go func() {
+		for range 5 {
+			p := set.Promise(t.Context(), Data{count: 0})
+			in <- p
+		}
+		// This one should error.
+		p := set.Promise(t.Context(), Data{count: -1})
+		in <- p
+		close(in)
+	}()
+
+	errCount := 0
+	for promise := range out {
+		resp, _ := promise.Get(t.Context())
+		if resp.Err != nil {
+			errCount++
+			continue
+		}
+		if resp.V.Data.count != 3 {
+			t.Errorf("TestWithPipeline: got count == %d, want count == 3", resp.V.Data.count)
+		}
+	}
+}

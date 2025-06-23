@@ -1,7 +1,7 @@
 /*
 Package fsets provides a function set for executing a chain of function calls that pass a state object between them.
 This is the mutant child of my statemachine package without fancy routing. It provides automatic retries and the idea
-is to reduce testing chains like a statemachine, but with a linear call method.
+is to reduce testing chains like with the statemachine, but with a linear calls.
 
 Where this is helpful is avoiding having to do a lot of testing of the entire call chain.  With this, you can test
 each function independently without having to mock out the next call. This also will let you still access helper methods
@@ -60,23 +60,123 @@ You will also notice that functions can have exponential backoff retries. You ca
 different backoffs for different functions. We also return the state object so that you can get return data that was stack
 allocated and not heap allocated. This is useful for performance and memory usage.
 
-In addition to the serial execution through Run() calls, you can also run the function set in parallel or concurrently.
-These allows you to feed in a channel of promises that will be executed in parallel or concurrently with the function set.
-Parallel and concurrent execution is simply a function of the number of concurrent goroutines that are running the function set.
-In parallel, there is a fixed number for execution say 5 instances are running. In concurrent, there might be 5 instances running
-with another len(fset.C) instances running. This mimics the behavior of channel based concurrency execution.
+In addition to the serial execution through Run() calls, you can also run the function set in parallel or concurrently. This is
+useful when you want to have a some type of bound on number of executions with resuse of goroutines.
+The provided methods allows you to feed in a channel of promises that will be executed in parallel or concurrently with the
+function set. Parallel and concurrent execution is simply a function of the number of concurrent goroutines that are running the
+function set. In parallel, there is a fixed number for execution say 5 instances are running. In concurrent, there might be 5
+instances running with another len(fset.C) instances running. This mimics the behavior of channel based concurrency execution.
+
+You can use promises to a provide a bounded RPC call chain:
+
+	type RPCServer struct {
+		fset fsets.Fset[RPCRequest]
+		in  chan<- promises.Promise[RPCRequest, RPCResponse]
+	}
+
+	func New(ctx context.Context) *RPCServer {
+		// Create a new Fset for the RPC server.
+		fset := fsets.Fset[RPCRequest]{}
+
+		r := &RPCServer{}
+		// Add the functions to the Fset. These can be methods or functions.
+		fset.Adds(
+			fsets.C[RPCRequest]{F: r.handleAuth, B: myBackoff},
+			fsets.C[RPCRequest]{F: r.handleData},
+			fsets.C[RPCRequest]{F: r.handleResponse},
+		)
+
+		in, _ := fset.Concurrent(ctx, -1)
+
+		r.fset = fset
+		r.in = in
+		return r
+	}
+
+	func (s *RPCServer) Serve(ctx context.Context, req RPCRequest) (RPCResponse, error) {
+		// Create a new promise for the request.
+		p := s.fset.Promise(ctx, req)
+
+		select {
+		case <-ctx.Done(): // If the context is cancelled, return an error.
+			return RPCResponse{}, ctx.Err()
+		case s.in <- p: // Send the promise to the channel for processing.
+		}
+
+		// Wait for the response.
+		resp, err := p.Get()
+		if err != nil { // Only happens if Context is cancelled.
+			return RPCResponse{}, err
+		}
+
+		return resp.V, resp.Err()
+	}
+
+This is similiar if you want to use parallel execution.
+
+You can also just use the Fset.Run(), which will be unbounded to the number of allowed RPC calls:
+
+	func (s *RPCServer) Serve(ctx context.Context, req RPCRequest) (RPCResponse, error) {
+		// Create a new StateObject for the request.
+		so := fsets.StateObject[RPCRequest]{Ctx: ctx, Data: req}
+
+		// Run the Fset with the StateObject.
+		resp := s.fset.Run(so)
+
+		if resp.Err() != nil {
+			return RPCResponse{}, resp.Err()
+		}
+
+		return resp.Data, nil
+	}
+
+You can also do an ordered pipeline by using the WithePipeline option when calling Concurrent or Parallel:
+
+	fset := fsets.Fset[Data]{}
+
+	// Add the functions to the Fset. These can be methods or functions.
+	fset.Adds(
+		fsets.C[Data]{F: handleAuth, B: myBackoff},
+		fsets.C[Data]{F: handleData},
+		fsets.C[Data]{F: handleResponse},
+	)
+	out := make(chan promises.Promise[StateObject[T], StateObject[T]], runtime.GOMAXPROCS(-1) + fset.Len())
+	in, _ := fset.Concurrent(ctx, -1, WithPipeline[Data](out))
+
+	go func() {
+		defer close(in) // Close the input channel when done.
+		for _, data := range inputData{
+			p := fset.Promise(ctx, data)
+			in <- p
+		}
+	}()
+
+	for promise := range out {
+		// Process the promise results.
+		resp, err := p.Get()
+		if err != nil { // Only happens if Context is cancelled.
+			log.Error("Error getting promise result", "error", err)
+			continue
+		}
+		if resp.Err() != nil {
+			log.Error("Error processing data", "error", resp.Err())
+			continue
+		}
+
+		log.Info("Processed data: ", resp.V)
+	}
 
 There is a cost to using fsets vs standard function call chains. The runtime has to do the calling of the function calls, which slows
 down the execution. In addition, I don't believe Go is smart enough to inline the function calls, so you lose that optimization as well.
 
-This can be seen with the following benchmark:
+This can be seen with the following benchmark where we make 3 functions calls:
 
 BenchmarkCallChain-10           573722551                2.073 ns/op
 BenchmarkFset-10                 8607430               141.8 ns/op
 
-This shows that the overhead of using fsets adds about 130-150 ns. But this is overhead that is an additon and not 70x slower
-execution time.  This is not a problem for most use cases that do any kind of system call (disk, network, ...). However,
-if its a real tight loop using cache lines, you want to use a standard function call chain.
+This shows that the overhead of using fsets adds about 46ns per call. This is not a problem for most use cases that do any kind
+of system call (disk, network, ...). However, if its a real tight loop using cache lines and no syscalls, you might want to
+use a standard function call chain that can be inlined and avoid the runtime overhead.
 */
 package fsets
 
@@ -146,11 +246,18 @@ type Fset[T any] struct {
 
 	promiseDo    sync.Once
 	promiseMaker *promises.Maker[StateObject[T], StateObject[T]]
+
+	outCloseDo sync.Once
 }
 
 // Adds adds calls to the Fset. This should not be called after Run().
 func (f *Fset[T]) Adds(calls ...C[T]) {
 	f.set = append(f.set, calls...)
+}
+
+// Len returns the number of calls in the Fset.
+func (f *Fset[T]) Len() int {
+	return len(f.set)
 }
 
 // Run runs the Fset calls. This is thread-safe as long as all calls are thread-safe.
@@ -172,33 +279,57 @@ func (f *Fset[T]) Run(so StateObject[T]) StateObject[T] {
 	return so
 }
 
+type parallelOption[T any] struct {
+	out chan promises.Promise[StateObject[T], StateObject[T]]
+}
+
+// ParallelOption is an option that can be used to configure the parallel execution of the Fset.
+type ParallelOption[T any] func(p parallelOption[T]) (parallelOption[T], error)
+
+// WithPipeline provides a channel to send the results of the Fset execution.
+func WithPipeline[T any](out chan promises.Promise[StateObject[T], StateObject[T]]) ParallelOption[T] {
+	return func(p parallelOption[T]) (parallelOption[T], error) {
+		p.out = out
+		return p, nil
+	}
+}
+
 // Parallel sets up a channel to run the Fset in parallel. This will spawn n goroutines that will execute this
 // in parallel and return a channel that you input promises to. Closing the channel will shut down the goroutines.
 // n is the number of goroutines to run in parallel. If n < 1, it will use gomaxprocs to determine the number of goroutines to run.
 // The context passed cannot be canceled. Control cancelation in the StateObject.Ctx, which works only if your functions support
 // it. The returned sync.Group can be used to wait for all goroutines to finish after closing the channel, if that is desired.
 // Use the Promise() method to create a new promise for the Fset to use with this channel.
-func (f *Fset[T]) Parallel(ctx context.Context, n int) (chan<- promises.Promise[StateObject[T], StateObject[T]], *sync.Group) {
-	return f.parallel(ctx, n)
+func (f *Fset[T]) Parallel(ctx context.Context, n int, options ...ParallelOption[T]) (chan<- promises.Promise[StateObject[T], StateObject[T]], *sync.Group) {
+	return f.parallel(ctx, n, options...)
 }
 
 // Concurrent sets up a channel to run the Fset concurrently with n numbers of parrallel goroutines that are executing
 // each C in the Fset concurrently. This means there are n * len(fset) goroutines running concurrently. Have 4 C's in the Fset, and
 // n == 2 will result in up to 8 different function calls running concurrently. If n < 1, it will use gomaxprocs to determine the
 // number of goroutines to run. Use the Promise() method to create a new promise for the Fset to use with this channel.
-func (f *Fset[T]) Concurrent(ctx context.Context, n int) (chan<- promises.Promise[StateObject[T], StateObject[T]], *sync.Group) {
+func (f *Fset[T]) Concurrent(ctx context.Context, n int, options ...ParallelOption[T]) (chan<- promises.Promise[StateObject[T], StateObject[T]], *sync.Group) {
 	// In reality, using numParallel * numStages is the same as spawning X goroutines for stages connected with channels and
 	// x parrallel goroutines for a set of stages. This avoids a lot of that overhead.
 	if n < 1 {
 		n = runtime.GOMAXPROCS(-1)
 	}
 	n = n * len(f.set)
-	return f.parallel(ctx, n)
+	return f.parallel(ctx, n, options...)
 }
 
-func (f *Fset[T]) parallel(ctx context.Context, n int) (chan<- promises.Promise[StateObject[T], StateObject[T]], *sync.Group) {
+func (f *Fset[T]) parallel(ctx context.Context, n int, options ...ParallelOption[T]) (chan<- promises.Promise[StateObject[T], StateObject[T]], *sync.Group) {
 	if len(f.set) == 0 {
 		panic("Fset.Concurrent called with no functions in the set")
+	}
+
+	po := parallelOption[T]{}
+	for _, opt := range options {
+		var err error
+		po, err = opt(po)
+		if err != nil {
+			panic("Fset.Concurrent called with invalid option: " + err.Error())
+		}
 	}
 
 	g := context.Pool(ctx).Limited(n).Group()
@@ -210,6 +341,17 @@ func (f *Fset[T]) parallel(ctx context.Context, n int) (chan<- promises.Promise[
 	context.Pool(ctx).Submit(
 		ctxNoCancel,
 		func() {
+			if po.out != nil {
+				defer func() {
+					f.outCloseDo.Do(
+						func() {
+							g.Wait(context.Background())
+							close(po.out)
+						},
+					)
+				}()
+			}
+
 			for promise := range ch {
 				so := promise.In
 				g.Go(
@@ -218,6 +360,9 @@ func (f *Fset[T]) parallel(ctx context.Context, n int) (chan<- promises.Promise[
 						// Run the Fset with the provided StateObject.
 						result := f.Run(so)
 						promise.Set(ctxNoCancel, result, result.Err())
+						if po.out != nil {
+							po.out <- promise
+						}
 						return nil
 					},
 				)
