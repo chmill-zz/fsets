@@ -64,7 +64,8 @@ func TestExec(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		so := StateObject[Data]{Ctx: t.Context()}
+		so := StateObject[Data]{}
+		so.ctx = t.Context()
 		so, err := test.c.exec(so)
 		switch {
 		case test.wantErr && err == nil:
@@ -123,8 +124,8 @@ func TestRun(t *testing.T) {
 	for _, test := range tests {
 		fsets := Fset[Data]{}
 		fsets.Adds(test.c...)
-		so := StateObject[Data]{Ctx: t.Context(), Data: Data{}}
-		so = fsets.Run(so)
+		so := StateObject[Data]{Data: Data{}}
+		so = fsets.Run(t.Context(), so)
 
 		switch {
 		case test.wantErr && so.Err() == nil:
@@ -165,12 +166,12 @@ func TestParallel(t *testing.T) {
 
 	promises := make([]promises.Promise[StateObject[Data], StateObject[Data]], 0, 5)
 	for range 5 {
-		p := set.Promise(t.Context(), Data{count: 0})
+		p := set.Promise(Data{count: 0})
 		in <- p
 		promises = append(promises, p)
 	}
 	// This one should error.
-	p := set.Promise(t.Context(), Data{count: -1})
+	p := set.Promise(Data{count: -1})
 	in <- p
 
 	_ = wait.Wait(t.Context())
@@ -212,11 +213,11 @@ func TestWithPipeline(t *testing.T) {
 
 	go func() {
 		for range 5 {
-			p := set.Promise(t.Context(), Data{count: 0})
+			p := set.Promise(Data{count: 0})
 			in <- p
 		}
 		// This one should error.
-		p := set.Promise(t.Context(), Data{count: -1})
+		p := set.Promise(Data{count: -1})
 		in <- p
 		close(in)
 	}()

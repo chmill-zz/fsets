@@ -21,10 +21,9 @@ Use is easy for regular functions:
 		fsets.C[MyDataType]{F: myFunction2},
 	)
 
-	so := fsets.StateObject[MyDataType]{Ctx: ctx, Data: myData}
-	var err error
-	so, err = fset.Run(so)
-	if err != nil {
+	so := fsets.StateObject[MyDataType]{Data: myData}
+	so = fset.Run(ctx, so)
+	if so.Err() != nil {
 		log.Error("Error running function set", "error", err)
 	}
 
@@ -36,9 +35,8 @@ Use with methods is also easy:
 		fsets.C[MyDataType]{F: myStruct.myMethod2},
 	)
 
-	so := fsets.StateObject[MyDataType]{Ctx: ctx, Data: myData}
-	var err error
-	so, err = fset.Run(so)
+	so := fsets.StateObject[MyDataType]{Data: myData}
+	so = fset.Run(ctx, so)
 
 You can also do this within a method of a struct:
 
@@ -51,9 +49,7 @@ You can also do this within a method of a struct:
 			fsets.C[MyDataType]{F: m.myMethod2},
 		)
 
-		so := fsets.StateObject[MyDataType]{Ctx: ctx, Data: myData}
-		_, err := fset.Run(so)
-		return err
+		return fset.Run(ctx, fsets.StateObject[MyDataType]{Data: myData}).Err()
 	}
 
 You will also notice that functions can have exponential backoff retries. You can set some to have this, others not and use
@@ -95,16 +91,14 @@ You can use promises to a provide a bounded RPC call chain:
 
 	func (s *RPCServer) Serve(ctx context.Context, req RPCRequest) (RPCResponse, error) {
 		// Create a new promise for the request.
-		p := s.fset.Promise(ctx, req)
+		p := s.fset.Promise(req)
 
-		select {
-		case <-ctx.Done(): // If the context is cancelled, return an error.
-			return RPCResponse{}, ctx.Err()
-		case s.in <- p: // Send the promise to the channel for processing.
+		if err := s.in.Send(ctx, p); err != nil {
+			return RPCResponse{}, err // Context cancelled or other error.
 		}
 
 		// Wait for the response.
-		resp, err := p.Get()
+		resp, err := p.Get(ctx)
 		if err != nil { // Only happens if Context is cancelled.
 			return RPCResponse{}, err
 		}
@@ -118,10 +112,10 @@ You can also just use the Fset.Run(), which will be bounded only to the number o
 
 	func (s *RPCServer) Serve(ctx context.Context, req RPCRequest) (RPCResponse, error) {
 		// Create a new StateObject for the request.
-		so := fsets.StateObject[RPCRequest]{Ctx: ctx, Data: req}
+		so := fsets.StateObject[RPCRequest]{Data: req}
 
 		// Run the Fset with the StateObject.
-		resp := s.fset.Run(so)
+		resp := s.fset.Run(ctx, so)
 
 		if resp.Err() != nil {
 			return RPCResponse{}, resp.Err()
@@ -142,14 +136,14 @@ You can also do an ordered pipeline by using the WithPipeline option when callin
 	)
 
 	// Create a channel to get the results on.
-	out := make(chan promises.Promise[StateObject[T], StateObject[T]], runtime.GOMAXPROCS(-1) + fset.Len())
+	out := make(chan promises.Promise[StateObject[T], StateObject[T]], 1)
 	in, _ := fset.Concurrent(ctx, -1, WithPipeline[Data](out))
 
 	// Send data to the input channel.
 	go func() {
 		defer close(in) // Close the input channel when done.
 		for _, data := range inputData{
-			p := fset.Promise(ctx, data)
+			p := fset.Promise(data)
 			in <- p
 		}
 	}()
@@ -157,7 +151,7 @@ You can also do an ordered pipeline by using the WithPipeline option when callin
 	// Get data from the output channel.
 	for promise := range out {
 		// Process the promise results.
-		resp, err := p.Get()
+		resp, err := p.Get(ctx)
 		if err != nil { // Only happens if Context is cancelled.
 			log.Error("Error getting promise result", "error", err)
 			continue
@@ -195,10 +189,11 @@ import (
 
 // StateObject is an object passed through the call chain for a single call.
 type StateObject[T any] struct {
-	// Ctx is the context for this call. If a context is not provided, it will default to context.Background().
-	Ctx context.Context
 	// Data is any data related to this call.
 	Data T
+
+	// ctx is the context for this call. If a context is not provided, it will default to context.Background().
+	ctx context.Context
 
 	// err is an error that can be set by any function in the call chain. If this is set, the call chain will stop.
 	err  error
@@ -213,6 +208,19 @@ func (s *StateObject[T]) Err() error {
 // Stop sets the StateObject to stop, which will stop the call chain without erroring.
 func (s *StateObject[T]) Stop() {
 	s.stop = true
+}
+
+// GetStop returns true if the call chain should stop. This is set by the Stop() method.
+// Normally not used by the user as this is checked internally. But useful if you decide to decompose
+// the Fset object at a later time.
+func (s *StateObject[T]) GetStop() bool {
+	return s.stop
+}
+
+// SetErr sets an error on the StateObject. This will stop the call chain and return the error in Err().
+// This should not be used in normal code as the functions can just return an error which does this automatically.
+func (s *StateObject[T]) SetErr(err error) {
+	s.err = err
 }
 
 // C is a function F and a retrier to use.
@@ -233,7 +241,7 @@ func (c C[T]) exec(so StateObject[T]) (StateObject[T], error) {
 		return c.F(so)
 	}
 	err := c.B.Retry(
-		so.Ctx,
+		so.ctx,
 		func(context.Context, exponential.Record) error {
 			var err error
 			so, err = c.F(so)
@@ -255,8 +263,9 @@ type Fset[T any] struct {
 }
 
 // Adds adds calls to the Fset. This should not be called after Run().
-func (f *Fset[T]) Adds(calls ...C[T]) {
+func (f *Fset[T]) Adds(calls ...C[T]) *Fset[T] {
 	f.set = append(f.set, calls...)
+	return f
 }
 
 // Len returns the number of calls in the Fset.
@@ -265,11 +274,13 @@ func (f *Fset[T]) Len() int {
 }
 
 // Run runs the Fset calls. This is thread-safe as long as all calls are thread-safe.
-func (f *Fset[T]) Run(so StateObject[T]) StateObject[T] {
+func (f *Fset[T]) Run(ctx context.Context, so StateObject[T]) StateObject[T] {
 	var err error
-	if so.Ctx == nil {
-		so.Ctx = context.Background()
+	if ctx == nil {
+		ctx = context.Background()
 	}
+	so.ctx = ctx
+
 	for _, call := range f.set {
 		so, err = call.exec(so)
 		if err != nil {
@@ -296,6 +307,21 @@ func WithPipeline[T any](out chan promises.Promise[StateObject[T], StateObject[T
 		p.out = out
 		return p, nil
 	}
+}
+
+// PromiseQueue is a channel that can be used to send promises to the Fset for parallel or concurrent execution.
+type PromiseQueue[T any] chan<- promises.Promise[StateObject[T], StateObject[T]]
+
+// Send sends a promise to the PromiseQueue. This is a blocking call until the promise is sent or the context is done.
+// The context is attached to the StateObject in the promise, so it can be used for cancelation.
+func (pq PromiseQueue[T]) Send(ctx context.Context, p promises.Promise[StateObject[T], StateObject[T]]) error {
+	p.In.ctx = ctx // Ensure the context is set on the StateObject.
+	select {
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	case pq <- p:
+	}
+	return nil
 }
 
 // Parallel sets up a channel to run the Fset in parallel. This will spawn n goroutines that will execute this
@@ -362,7 +388,7 @@ func (f *Fset[T]) parallel(ctx context.Context, n int, options ...ParallelOption
 					ctxNoCancel,
 					func(ctx context.Context) error {
 						// Run the Fset with the provided StateObject.
-						result := f.Run(so)
+						result := f.Run(so.ctx, so)
 						promise.Set(ctxNoCancel, result, result.Err())
 						if po.out != nil {
 							po.out <- promise
@@ -379,7 +405,7 @@ func (f *Fset[T]) parallel(ctx context.Context, n int, options ...ParallelOption
 
 // Promise helps create a new promise for the Fset for use with the Parallel or Concurrent methods.
 // This is easier and more efficient than creating a new promise manually.
-func (f *Fset[T]) Promise(ctx context.Context, data T) promises.Promise[StateObject[T], StateObject[T]] {
+func (f *Fset[T]) Promise(data T) promises.Promise[StateObject[T], StateObject[T]] {
 	f.promiseDo.Do(
 		func() {
 			if f.promiseMaker == nil {
@@ -388,6 +414,6 @@ func (f *Fset[T]) Promise(ctx context.Context, data T) promises.Promise[StateObj
 		},
 	)
 
-	so := StateObject[T]{Ctx: ctx, Data: data}
-	return f.promiseMaker.New(ctx, so)
+	so := StateObject[T]{Data: data}
+	return f.promiseMaker.New(context.Background(), so)
 }

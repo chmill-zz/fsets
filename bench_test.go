@@ -1,6 +1,8 @@
 package fsets
 
-import "testing"
+import (
+	"testing"
+)
 
 type args struct {
 	i int
@@ -51,7 +53,7 @@ func BenchmarkFset(b *testing.B) {
 
 	for b.Loop() {
 		so := StateObject[args]{Data: args{i: 0}}
-		so = set.Run(so)
+		so = set.Run(b.Context(), so)
 		result = so.Data
 	}
 }
