@@ -106,7 +106,7 @@ You can use promises to a provide a bounded RPC call chain:
 		return resp.V, resp.Err()
 	}
 
-It is similiar if you want to use parallel execution instead using .Parallel() instead of .Concurrent().
+It is similar if you want to use parallel execution instead using .Parallel() instead of .Concurrent().
 
 You can also just use the Fset.Run(), which will be bounded only to the number of allowed RPC calls:
 
@@ -368,13 +368,13 @@ func (f *Fset[T]) Parallel(ctx context.Context, n int, options ...ParallelOption
 	return f.parallel(ctx, n, options...)
 }
 
-// Concurrent sets up a channel to run the Fset concurrently with n numbers of parrallel goroutines that are executing
+// Concurrent sets up a channel to run the Fset concurrently with n numbers of parallel goroutines that are executing
 // each C in the Fset concurrently. This means there are n * len(fset) goroutines running concurrently. Have 4 C's in the Fset, and
 // n == 2 will result in up to 8 different function calls running concurrently. If n < 1, it will use gomaxprocs to determine the
 // number of goroutines to run. Use the Promise() method to create a new promise for the Fset to use with this channel.
 func (f *Fset[T]) Concurrent(ctx context.Context, n int, options ...ParallelOption[T]) (chan<- promises.Promise[StateObject[T], StateObject[T]], *sync.Group) {
 	// In reality, using numParallel * numStages is the same as spawning X goroutines for stages connected with channels and
-	// x parrallel goroutines for a set of stages. This avoids a lot of that overhead.
+	// x parallel goroutines for a set of stages. This avoids a lot of that overhead.
 	if n < 1 {
 		n = runtime.GOMAXPROCS(-1)
 	}
