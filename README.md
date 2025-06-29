@@ -1,9 +1,11 @@
 # fsets
+
+[![GoDoc](https://godoc.org/github.com/johnsiilver/fsets?status.svg)](https://pkg.go.dev/github.com/gostdlib/base)
+[![Go Report Card](https://goreportcard.com/badge/johnsiilver/fsets)](https://goreportcard.com/report/johnsiilver/fsets)
+
 Functional set execution
 
-The idea here is similar to fqueue and my statemachine.  What we want to do is execute functions sequentially. We want them to pass a state object while still having access to a class.  
+This provides a simple set of functions that represent a call chain for various types of execution. This includes standard
+calls, concurrenty/parallel calls and pipelines.
 
-I'm hoping this might give us statemachine like behavior for testing instead of cascading calls that have to be faked.
-
-
-
+This makes testing a call chain easier as it decouples the calls in the chain. See the godoc for more information.
