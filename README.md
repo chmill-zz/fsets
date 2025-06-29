@@ -1,6 +1,6 @@
 # fsets
 
-[![GoDoc](https://godoc.org/github.com/johnsiilver/fsets?status.svg)](https://pkg.go.dev/github.com/gostdlib/base)
+[![GoDoc](https://godoc.org/github.com/johnsiilver/fsets?status.svg)](https://pkg.go.dev/github.com/johnsiilver/fsets)
 [![Go Report Card](https://goreportcard.com/badge/johnsiilver/fsets)](https://goreportcard.com/report/johnsiilver/fsets)
 
 Functional set execution
