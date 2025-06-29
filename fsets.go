@@ -175,6 +175,11 @@ BenchmarkFset-10                 8607430               141.8 ns/op
 This shows that the overhead of using fsets adds about 46ns per call. This is not a problem for most use cases that do any kind
 of system call (disk, network, ...). However, if its a real tight loop using cache lines and no syscalls, you might want to
 use a standard function call chain that can be inlined and avoid the runtime overhead.
+
+There is an experimental compiler (fsetcodegen/) which has its own README so you understand the limitations and how to use it.
+You can install it and use go generate to generate the compiled version of the Fset. This will significantly reduce the
+overhead of using fsets and allow you to use the same API as the Fset, but with a compiled version that is much faster. There are
+examples of this in testing/compiler and testing/fakeRPC.
 */
 package fsets
 
@@ -187,7 +192,10 @@ import (
 	"github.com/gostdlib/base/values/generics/promises"
 )
 
-// StateObject is an object passed through the call chain for a single call.
+// StateObject is an object passed through the call chain for a single call. It passed along a data object of type T
+// that is passed down the call chain. When the object is returned at the end of a Run() call, calling .Err() will determine
+// if an error occurred in the call chain. Any function the call chain can call .Stop() to stop the call chain without
+// erroring. The Set*() calls are used by the fsets compiler and not for users.
 type StateObject[T any] struct {
 	// Data is any data related to this call.
 	Data T
@@ -217,13 +225,20 @@ func (s *StateObject[T]) GetStop() bool {
 	return s.stop
 }
 
+// SetCtx sets the context for the StateObject. This is not used by users but is provided for
+// the fsets compiler.
+func (s *StateObject[T]) SetCtx(ctx context.Context) {
+	s.ctx = ctx
+}
+
 // SetErr sets an error on the StateObject. This will stop the call chain and return the error in Err().
 // This should not be used in normal code as the functions can just return an error which does this automatically.
 func (s *StateObject[T]) SetErr(err error) {
 	s.err = err
 }
 
-// C is a function F and a retrier to use.
+// C represents a function call, represented by F . If a user wants F to be called with an exponential backoff mechanism,
+// they can supply if via B. O represents options for the Backoff.Retry call, which can be used to customize the retry behavior.
 type C[T any] struct {
 	// F is the function to call.
 	F func(so StateObject[T]) (StateObject[T], error)
@@ -252,20 +267,32 @@ func (c C[T]) exec(so StateObject[T]) (StateObject[T], error) {
 	return so, err
 }
 
-// Fset is a set of functions to call. If any return an error, the calls stop.
+// Fset is a set of functions in the order they are added. If any return an error, the calls stop.
 type Fset[T any] struct {
-	set []C[T]
+	set      []C[T]
+	compiled CompiledFset[T]
 
 	promiseDo    sync.Once
 	promiseMaker *promises.Maker[StateObject[T], StateObject[T]]
 
 	outCloseDo sync.Once
+	ran        bool
 }
 
-// Adds adds calls to the Fset. This should not be called after Run().
+// Adds adds calls to the Fset. Calling this after Run() has been called will panic.
 func (f *Fset[T]) Adds(calls ...C[T]) *Fset[T] {
+	if f.ran {
+		panic("Fset.Adds called after Fset.Run")
+	}
 	f.set = append(f.set, calls...)
 	return f
+}
+
+// CompiledFset is a compiled version of the Fset by the fsetcodegen tool.
+type CompiledFset[T any] func(ctx context.Context, so StateObject[T]) StateObject[T]
+
+func (f *Fset[T]) Compiled(c CompiledFset[T]) {
+	f.compiled = c
 }
 
 // Len returns the number of calls in the Fset.
@@ -275,11 +302,18 @@ func (f *Fset[T]) Len() int {
 
 // Run runs the Fset calls. This is thread-safe as long as all calls are thread-safe.
 func (f *Fset[T]) Run(ctx context.Context, so StateObject[T]) StateObject[T] {
+	f.ran = true
+
 	var err error
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	so.ctx = ctx
+
+	if f.compiled != nil {
+		// If we have a compiled version, use that.
+		return f.compiled(ctx, so)
+	}
 
 	for _, call := range f.set {
 		so, err = call.exec(so)

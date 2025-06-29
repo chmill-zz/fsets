@@ -2,10 +2,13 @@ module github.com/johnsiilver/fsets
 
 go 1.24.2
 
-require github.com/gostdlib/base v0.0.0-20250609190732-4cf364d5a0c7
+require (
+	github.com/Azure/retry v0.0.0-20250221010952-92c9290cea0f
+	github.com/gostdlib/base v0.0.0-20250609190732-4cf364d5a0c7
+	github.com/kylelemons/godebug v1.1.0
+)
 
 require (
-	github.com/Azure/retry v0.0.0-20250221010952-92c9290cea0f // indirect
 	github.com/andybalholm/brotli v1.1.1 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
