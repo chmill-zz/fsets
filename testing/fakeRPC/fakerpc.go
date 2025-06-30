@@ -20,7 +20,7 @@ type RPCServer struct {
 	serveFset *fsets.Fset[serveSO]
 }
 
-//go:generate fsetcodegen -var=serveFset -func=New
+//go:generate fsetcodegen -var=serveFset -func=New --inline
 
 func New(ctx context.Context) *RPCServer {
 	// Create a new Fset for the RPC server.

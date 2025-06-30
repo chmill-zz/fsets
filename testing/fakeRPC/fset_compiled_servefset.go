@@ -3,6 +3,7 @@ package fakerpc
 
 import (
 	"context"
+	"errors"
 	"github.com/johnsiilver/fsets"
 )
 
@@ -14,16 +15,24 @@ func newServeFsetCompiled(obj *RPCServer) func(ctx context.Context, so fsets.Sta
 			ctx = context.Background()
 		}
 		so.SetCtx(ctx)
-		so, err = obj.handleAuth(so)
-		if err != nil || so.GetStop() {
+		if so.Data.req.User == "" {
+			err = errors.New("user not authenticated")
 			so.SetErr(err)
 			return so
 		}
-		so, err = obj.handleData(so)
-		if err != nil || so.GetStop() {
+		if so.Data.req.User != "admin" {
+			err = errors.New("unauthorized user")
 			so.SetErr(err)
 			return so
 		}
+
+		if so.Data.req.Data == "" {
+			err = errors.New("no data provided")
+			so.SetErr(err)
+			return so
+		}
+		so.Data.resp.Data = "Processed: " + so.Data.req.Data
+
 		return so
 	}
 }
